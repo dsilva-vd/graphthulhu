@@ -257,6 +257,13 @@ func (w *Write) RenamePage(ctx context.Context, req *mcp.CallToolRequest, input 
 	return res, nil, err
 }
 
+// propertyUpdater is satisfied by backends that can update YAML frontmatter
+// directly (e.g. the Obsidian vault client). When a backend implements this,
+// BulkUpdateProperties uses it instead of the Logseq inline-block path.
+type propertyUpdater interface {
+	UpdatePageProperties(ctx context.Context, name string, updates map[string]any) error
+}
+
 // BulkUpdateProperties sets a property on multiple pages at once.
 func (w *Write) BulkUpdateProperties(ctx context.Context, req *mcp.CallToolRequest, input types.BulkUpdatePropertiesInput) (*mcp.CallToolResult, any, error) {
 	if len(input.Pages) == 0 {
@@ -266,40 +273,52 @@ func (w *Write) BulkUpdateProperties(ctx context.Context, req *mcp.CallToolReque
 	var updated []string
 	var failed []string
 
-	for _, pageName := range input.Pages {
-		// Get the page's first block (property block in Logseq).
-		blocks, err := w.client.GetPageBlocksTree(ctx, pageName)
-		if err != nil || len(blocks) == 0 {
-			failed = append(failed, pageName)
-			continue
-		}
-
-		// Find or create the property in the first block.
-		firstBlock := blocks[0]
-		content := firstBlock.Content
-		propLine := fmt.Sprintf("%s:: %s", input.Property, input.Value)
-
-		// Check if property already exists.
-		lines := strings.Split(content, "\n")
-		found := false
-		for i, line := range lines {
-			if strings.HasPrefix(line, input.Property+":: ") {
-				lines[i] = propLine
-				found = true
-				break
+	// Obsidian backend: update YAML frontmatter directly.
+	if pu, ok := w.client.(propertyUpdater); ok {
+		for _, pageName := range input.Pages {
+			if err := pu.UpdatePageProperties(ctx, pageName, map[string]any{input.Property: input.Value}); err != nil {
+				failed = append(failed, pageName)
+				continue
 			}
+			updated = append(updated, pageName)
 		}
-		if !found {
-			// Append property line.
-			lines = append(lines, propLine)
-		}
+	} else {
+		// Logseq backend: write inline block properties.
+		for _, pageName := range input.Pages {
+			// Get the page's first block (property block in Logseq).
+			blocks, err := w.client.GetPageBlocksTree(ctx, pageName)
+			if err != nil || len(blocks) == 0 {
+				failed = append(failed, pageName)
+				continue
+			}
 
-		newContent := strings.Join(lines, "\n")
-		if err := w.client.UpdateBlock(ctx, firstBlock.UUID, newContent); err != nil {
-			failed = append(failed, pageName)
-			continue
+			// Find or create the property in the first block.
+			firstBlock := blocks[0]
+			content := firstBlock.Content
+			propLine := fmt.Sprintf("%s:: %s", input.Property, input.Value)
+
+			// Check if property already exists.
+			lines := strings.Split(content, "\n")
+			found := false
+			for i, line := range lines {
+				if strings.HasPrefix(line, input.Property+":: ") {
+					lines[i] = propLine
+					found = true
+					break
+				}
+			}
+			if !found {
+				// Append property line.
+				lines = append(lines, propLine)
+			}
+
+			newContent := strings.Join(lines, "\n")
+			if err := w.client.UpdateBlock(ctx, firstBlock.UUID, newContent); err != nil {
+				failed = append(failed, pageName)
+				continue
+			}
+			updated = append(updated, pageName)
 		}
-		updated = append(updated, pageName)
 	}
 
 	res, err := jsonTextResult(map[string]any{

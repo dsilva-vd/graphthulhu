@@ -187,6 +187,23 @@ func (lb *LazyBackend) RenamePage(ctx context.Context, oldName, newName string) 
 	return lb.inner.RenamePage(ctx, oldName, newName)
 }
 
+// UpdatePageProperties forwards to inner if it supports YAML frontmatter writes.
+// This allows the propertyUpdater interface check in tools/write.go to work
+// even when the vault client is wrapped in a LazyBackend.
+func (lb *LazyBackend) UpdatePageProperties(ctx context.Context, name string, updates map[string]any) error {
+	if err := lb.wait(ctx); err != nil {
+		return err
+	}
+	type propertyUpdater interface {
+		UpdatePageProperties(ctx context.Context, name string, updates map[string]any) error
+	}
+	pu, ok := lb.inner.(propertyUpdater)
+	if !ok {
+		return fmt.Errorf("backend does not support UpdatePageProperties")
+	}
+	return pu.UpdatePageProperties(ctx, name, updates)
+}
+
 // --- Capability interfaces (typed precisely on inner; no fallback needed) ---
 
 func (lb *LazyBackend) FullTextSearch(ctx context.Context, query string, limit int) ([]SearchHit, error) {

@@ -1176,6 +1176,51 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	return nil
 }
 
+// UpdatePageProperties reads the file for the named page, merges the given
+// properties into its YAML frontmatter (creating a frontmatter block if none
+// exists), and writes the file back. The body content is preserved unchanged.
+func (c *Client) UpdatePageProperties(_ context.Context, name string, updates map[string]any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	lowerName := strings.ToLower(name)
+	cached, ok := c.pages[lowerName]
+	if !ok {
+		return fmt.Errorf("page not found: %s", name)
+	}
+
+	absPath, err := c.safePath(cached.filePath)
+	if err != nil {
+		return err
+	}
+
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+
+	existing, body := parseFrontmatter(string(raw))
+	if existing == nil {
+		existing = make(map[string]any)
+	}
+	for k, v := range updates {
+		existing[k] = v
+	}
+
+	newContent := renderFrontmatter(existing) + body
+	if err := atomicWrite(absPath, newContent); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	c.indexFileCore(cached.filePath, newContent, info)
+	c.rebuildLinksLocked()
+	return nil
+}
+
 // --- Write helpers ---
 
 // atomicWrite writes content to a file via a temp file rename.
